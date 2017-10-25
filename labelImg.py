@@ -5,9 +5,14 @@ import os.path
 import re
 import sys
 import subprocess
+import natsort
+import xmltodict
+import json
 
 from functools import partial
 from collections import defaultdict
+
+JSON_EXT = '.json'
 
 try:
     from PyQt5.QtGui import *
@@ -84,7 +89,7 @@ class HashableQListWidgetItem(QListWidgetItem):
 class MainWindow(QMainWindow, WindowMixin):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = list(range(3))
 
-    def __init__(self, defaultFilename=None, defaultPrefdefClassFile=None):
+    def __init__(self, defaultFilename = None, defaultPrefdefClassFile = None):
         super(MainWindow, self).__init__()
         self.setWindowTitle(__appname__)
 
@@ -228,10 +233,13 @@ class MainWindow(QMainWindow, WindowMixin):
                         'space', 'verify', u'Verify Image')
 
         save = action('&Save', self.saveFile,
-                      'Ctrl+S', 'save', u'Save labels to file', enabled=False)
+                      'Ctrl+S', 'save', u'Save labels to file')
 
         saveAs = action('&Save As', self.saveFileAs,
-                        'Ctrl+Shift+S', 'save-as', u'Save labels to a different file', enabled=False)
+                        'Ctrl+Shift+S', 'save-as', u'Save labels to a different file')
+
+        saveAllToJson = action('&Save all to json', self.saveAllToJson,
+                               'Ctrl+alt+s', 'save-all-to-json', u'Save all files to a json file')
 
         close = action('&Close', self.closeFile, 'Ctrl+W', 'close', u'Close current file')
         
@@ -322,7 +330,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.popLabelListMenu)
 
         # Store actions for further handling.
-        self.actions = struct(save=save, saveAs=saveAs, open=open, close=close, resetAll = resetAll,
+        self.actions = struct(save=save, saveAs=saveAs, saveAllToJson=saveAllToJson, open=open, close=close, resetAll= resetAll,
                               lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,
                               createMode=createMode, editMode=editMode, advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
@@ -330,7 +338,7 @@ class MainWindow(QMainWindow, WindowMixin):
                               fitWindow=fitWindow, fitWidth=fitWidth,
                               zoomActions=zoomActions,
                               fileMenuActions=(
-                                  open, opendir, save, saveAs, close, resetAll, quit),
+                                  open, opendir, save, saveAs, saveAllToJson, close, resetAll, quit),
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1),
@@ -361,7 +369,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.lastLabel = None
 
         addActions(self.menus.file,
-                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, saveAs, close, resetAll, quit))
+                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, saveAs, saveAllToJson, close, resetAll, quit))
         addActions(self.menus.help, (help,))
         addActions(self.menus.view, (
             self.autoSaving,
@@ -381,11 +389,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.tools = self.toolbar('Tools')
         self.actions.beginner = (
-            open, opendir, changeSavedir, openNextImg, openPrevImg, verify, save, None, create, copy, delete, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, verify, save, None, saveAllToJson, create, copy, delete, None,
             zoomIn, zoom, zoomOut, fitWindow, fitWidth)
 
         self.actions.advanced = (
-            open, opendir, changeSavedir, openNextImg, openPrevImg, save, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, save, None, saveAllToJson,
             createMode, editMode, None,
             hideAll, showAll)
 
@@ -551,6 +559,8 @@ class MainWindow(QMainWindow, WindowMixin):
         assert self.beginner()
         self.canvas.setEditing(False)
         self.actions.create.setEnabled(False)
+        self.actions.save.setEnabled(True)
+        self.actions.saveAllToJson.setEnabled(True)
 
     def toggleDrawingSensitive(self, drawing=True):
         """In the middle of drawing, toggling between modes should be disabled."""
@@ -1210,6 +1220,75 @@ class MainWindow(QMainWindow, WindowMixin):
             self.setClean()
             self.statusBar().showMessage('Saved to  %s' % annotationFilePath)
             self.statusBar().show()
+
+
+    # save all xmlfiles to Json
+    def saveAllToJson(self, _value=False):
+        def extractLoc(xmlStr):
+
+            convertedDict = xmltodict.parse(xmlStr)
+
+            objList = []
+            obj = convertedDict['annotation']['object']
+            filename = convertedDict['annotation']['filename']
+
+            if (isinstance(obj, dict)):
+                obj['bndbox']['x1'] = int(float(obj['bndbox'].pop('xmin')))
+                obj['bndbox']['x2'] = int(float(obj['bndbox'].pop('xmax')))
+                obj['bndbox']['y1'] = int(float(obj['bndbox'].pop('ymin')))
+                obj['bndbox']['y2'] = int(float(obj['bndbox'].pop('ymax')))
+
+                # obj['bndbox'] = map(eval, obj['bndbox'])
+
+                objList.append(obj['bndbox'])
+
+            elif (isinstance(obj, list)):
+                for i in obj:
+                    i['bndbox']['x1'] = int(float(i['bndbox'].pop('xmin')))
+                    i['bndbox']['x2'] = int(float(i['bndbox'].pop('xmax')))
+                    i['bndbox']['y1'] = int(float(i['bndbox'].pop('ymin')))
+                    i['bndbox']['y2'] = int(float(i['bndbox'].pop('ymax')))
+
+                    # i['bndbox'] = map(eval, i['bndbox'])
+                    objList.append(i['bndbox'])
+            else:
+                pass
+            return filename, objList
+
+        def saveJson(file_name, contents):
+            fh = open(file_name + '.json', 'w')
+            fh.write(contents)
+            fh.close()
+            print('Saving...')
+        if self.defaultSaveDir is not None and len(ustr(self.defaultSaveDir)):
+            xmlPath = self.defaultSaveDir
+            g = os.walk(xmlPath)
+            data = []
+            for path, d, filelist in g:
+                filelist = natsort.natsorted(filelist)
+                for filename in filelist:
+                    if filename.endswith(XML_EXT):
+                        # print(os.path.join(path, filename))
+                        xmlName = xmlPath + '/' +  filename
+                        xmlFile = open(xmlName, 'r', encoding='UTF-8').read()
+                        print('Processing :', xmlName)
+                        # rects.append(extractLoc(xmlFile))
+                        rects = {}
+                        (rects['image_path'], rects['rects']) = extractLoc(xmlFile)
+
+                        if (rects['rects'] != []):
+                            data.append(rects)
+                        print('Extracted success!')
+
+
+            jsonStr = json.dumps(data, indent=1)
+
+            saveJson(os.path.splitext(xmlName)[0], jsonStr)
+
+
+            # load all xml files
+            xmlnames = os.listdir(xmlPath)
+            self.loadPascalXMLByFilename(xmlPath)
 
     def closeFile(self, _value=False):
         if not self.mayContinue():
